@@ -1,87 +1,72 @@
 
 import os
 import logging
-import requests
-
+import asyncio
+from aiohttp import web
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
+
+telegram_app = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔎 OSINT BOT\n\n"
-        "Я ищу публичную информацию в интернете.\n\n"
-        "Отправь имя или username для поиска."
+        "Я ищу общедоступные сведения и публичные упоминания.\n"
+        "Отправь поисковый запрос."
     )
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
 
     if len(query) < 2 or len(query) > 100:
-        await update.message.reply_text("Введите запрос от 2 до 100 символов.")
+        await update.message.reply_text("Запрос должен содержать от 2 до 100 символов.")
         return
 
-    await update.message.reply_text("🔍 Ищу публичные упоминания...")
+    await update.message.reply_text(
+        "🔍 Поиск публичных упоминаний:\n\n"
+        f"Запрос: {query}\n\n"
+        "Открыть поиск:\n"
+        f"https://www.google.com/search?q={query.replace(' ', '+')}"
+    )
 
-    try:
-        response = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json"},
-            timeout=15
-        )
-        response.raise_for_status()
-        data = response.json()
+async def webhook(request):
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return web.Response(text="OK")
 
-        results = []
-
-        abstract = data.get("AbstractText")
-        if abstract:
-            results.append(abstract)
-
-        for item in data.get("RelatedTopics", []):
-            if isinstance(item, dict) and item.get("Text"):
-                results.append(item["Text"])
-
-        if not results:
-            await update.message.reply_text(
-                "Ничего не найдено. Попробуй другой запрос."
-            )
-            return
-
-        message = "📄 Публичные результаты:\n\n"
-        for item in results[:5]:
-            message += "• " + item[:500] + "\n\n"
-
-        await update.message.reply_text(message[:4000])
-
-    except requests.RequestException:
-        await update.message.reply_text("Ошибка соединения с поиском.")
+async def health(request):
+    return web.Response(text="Bot is running")
 
 async def main():
     if not TOKEN:
-        raise RuntimeError("Не задан BOT_TOKEN")
+        raise RuntimeError("BOT_TOKEN не задан")
 
-    app = Application.builder().token(TOKEN).build()
+    await telegram_app.initialize()
+    await telegram_app.start()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
+    server = web.Application()
+    server.router.add_post("/webhook", webhook)
+    server.router.add_get("/", health)
 
-    print("OSINT BOT запущен")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
+    runner = web.AppRunner(server)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    webhook_url = os.getenv("RENDER_EXTERNAL_URL")
+    if webhook_url:
+        await telegram_app.bot.set_webhook(webhook_url + "/webhook")
+
+    logging.info("OSINT BOT запущен")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    import asyncio
-    import asyncio
     asyncio.run(main())
+
