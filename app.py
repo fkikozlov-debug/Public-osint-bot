@@ -10,11 +10,17 @@ import aiohttp
 from aiohttp import web
 from bs4 import BeautifulSoup
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
@@ -28,16 +34,93 @@ logger = logging.getLogger(__name__)
 bot = None
 
 
+def main_menu():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🌐 Веб-поиск",
+                callback_data="web"
+            ),
+            InlineKeyboardButton(
+                "📱 Проверка номера",
+                callback_data="phone"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💬 Соцсети",
+                callback_data="social"
+            ),
+            InlineKeyboardButton(
+                "🌍 Домен и IP",
+                callback_data="domain"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏢 Компании",
+                callback_data="company"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["mode"] = "web"
+
     await update.message.reply_text(
-        "Привет! Я Public OSINT Bot.\n\n"
-        "Я ищу публичные публикации, сайты и информацию о компаниях.\n"
-        "Напиши поисковый запрос."
+        "🔎 BURMALDA OSINT BOT\n\n"
+        "Выбери категорию поиска:",
+        reply_markup=main_menu()
+    )
+
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["mode"] = "web"
+
+    await update.message.reply_text(
+        "Выбери категорию:",
+        reply_markup=main_menu()
+    )
+
+
+async def category_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    mode = query.data
+    context.user_data["mode"] = mode
+
+    messages = {
+        "web": "🌐 Отправь запрос для поиска в интернете.",
+        "phone": (
+            "📱 Отправь номер телефона.\n"
+            "Я проверю только его формат и страну."
+        ),
+        "social": (
+            "💬 Отправь ссылку на публичную страницу "
+            "соцсети или организации."
+        ),
+        "domain": "🌍 Отправь домен или IP-адрес.",
+        "company": (
+            "🏢 Отправь название компании или её ИНН."
+        )
+    }
+
+    await query.edit_message_text(
+        messages.get(mode, "Выбери категорию:"),
+        reply_markup=main_menu()
     )
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
+    mode = context.user_data.get("mode", "web")
 
     if len(query) < 2 or len(query) > 100:
         await update.message.reply_text(
@@ -45,15 +128,24 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    digits = re.sub(r"\D", "", query)
+    if mode == "phone":
+        digits = re.sub(r"\D", "", query)
 
-    if len(digits) >= 7:
+        if not 7 <= len(digits) <= 15:
+            await update.message.reply_text(
+                "Проверь номер: нужно от 7 до 15 цифр."
+            )
+            return
+
         await update.message.reply_text(
-            "Поиск частных лиц по телефонным номерам не поддерживается."
+            "✅ Формат номера подходит.\n"
+            "Поиск владельца и частных данных не поддерживается."
         )
         return
 
-    await update.message.reply_text("Ищу публичные результаты...")
+    await update.message.reply_text(
+        "🔎 Ищу публичную информацию..."
+    )
 
     search_url = (
         "https://html.duckduckgo.com/html/?q="
@@ -66,14 +158,12 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
                 search_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0"
-                }
+                headers={"User-Agent": "Mozilla/5.0"}
             ) as response:
 
                 if response.status != 200:
                     raise RuntimeError(
-                        "Поисковик вернул ошибку: "
+                        "Ошибка поисковика: "
                         + str(response.status)
                     )
 
@@ -88,7 +178,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        message = "Результаты поиска:\n\n"
+        message = "🔎 Результаты поиска:\n\n"
         count = 0
 
         for result in results:
@@ -112,19 +202,18 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if "uddg" in params:
                 link = params["uddg"][0]
-
             elif link.startswith("//"):
                 link = "https:" + link
 
-            if not link.startswith("https://") and not link.startswith("http://"):
+            if not link.startswith(("https://", "http://")):
                 continue
 
             count += 1
 
             message += (
-                str(count) + ". " + title + "\n"
-                + snippet[:200] + "\n"
-                + link + "\n\n"
+                f"{count}. {title}\n"
+                f"{snippet[:200]}\n"
+                f"{link}\n\n"
             )
 
             if count >= 5:
@@ -152,7 +241,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_webhook(request):
     try:
         data = await request.json()
-
         update = Update.de_json(data, bot.bot)
 
         await bot.process_update(update)
@@ -180,8 +268,11 @@ async def main():
 
     bot = Application.builder().token(TOKEN).build()
 
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("menu", menu))
+
     bot.add_handler(
-        CommandHandler("start", start)
+        CallbackQueryHandler(category_callback)
     )
 
     bot.add_handler(
@@ -200,7 +291,6 @@ async def main():
     server.router.add_post("/webhook", handle_webhook)
 
     runner = web.AppRunner(server)
-
     await runner.setup()
 
     site = web.TCPSite(
@@ -220,11 +310,12 @@ async def main():
 
     await bot.bot.set_webhook(webhook_url)
 
-    logger.info("Бот запущен и webhook настроен!")
+    logger.info("Бот запущен и меню настроено!")
 
     await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
