@@ -62,6 +62,11 @@ async def main():
     if not TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN")
 
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
+
+    await bot.initialize()
+
     await bot.initialize()
     await bot.start()
 
